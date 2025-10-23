@@ -1,0 +1,128 @@
+name: Terraform VPC — Dev/QA/Prod
+
+# Allow manual runs and runs on pushes to infra branches
+on:
+  push:
+    branches:
+      - main
+      - qa
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # optional if using OIDC to assume role
+  actions: read
+  metadata: read
+
+concurrency:
+  group: terraform-vpc-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Default region; can be overridden by env-specific secrets or TF_VARs
+  AWS_REGION: eu-west-1
+  TF_VERSION: 1.5.0
+
+# Matrix defines the three environments. Adjust path if needed.
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        env_name: [dev, qa, prod]
+      fail-fast: false
+
+    environment: ${{ matrix.env_name }}   # maps to GitHub Environment (prod can require approval)
+
+    # Map each environment to a terraform working directory and remote state key
+    # If your actual path differs, update workdir below.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Select environment variables and paths
+        id: vars
+        run: |
+          echo "ENV_NAME=${{ matrix.env_name }}" >> $GITHUB_ENV
+          # Base working directory that contains parent main.tf for VPC per your note
+          # Adjust if your module path differs.
+          WORKDIR="persistent-terraform-modules/infrastructure/${{ matrix.env_name }}/vpc"
+          echo "WORKDIR=${WORKDIR}" >> $GITHUB_ENV
+
+          # remote state S3 key per environment (change bucket via secret below)
+          STATE_KEY="state/${{ matrix.env_name }}/vpc/terraform.tfstate"
+          echo "STATE_KEY=${STATE_KEY}" >> $GITHUB_ENV
+
+      - name: Terraform Init (S3 Backend)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          # Recommended: configure S3 backend. Make sure TF_STATE_BUCKET and optional DDB table exist.
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform Format & Validate
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          terraform fmt -check || (terraform fmt && echo "formatted")
+          terraform validate
+
+      - name: Terraform Plan
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          PLAN_FILE="plan-${{ env.ENV_NAME }}.tfplan"
+          terraform plan -input=false -out="${PLAN_FILE}"
+          terraform show -no-color "${PLAN_FILE}" > "${PLAN_FILE}.txt"
+        # upload plan text for inspection
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tf-plan-${{ env.ENV_NAME }}
+          path: |
+            ${{ env.WORKDIR }}/plan-${{ env.ENV_NAME }}.tfplan
+            ${{ env.WORKDIR }}/plan-${{ env.ENV_NAME }}.tfplan.txt
+
+      - name: Auto-apply for non-prod (dev/qa)
+        if: ${{ matrix.env_name != 'prod' }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          PLAN_FILE="plan-${{ env.ENV_NAME }}.tfplan"
+          terraform apply -input=false -auto-approve "${PLAN_FILE}"
+
+      - name: Wait for manual approval and apply (prod)
+        if: ${{ matrix.env_name == 'prod' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: tf-plan-prod
+          path: ./prod-plan-artifacts
+
+      - name: Apply (prod) — manual approval required by GitHub
+        if: ${{ matrix.env_name == 'prod' }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          # This job runs only after a human approves the GitHub Environment "prod"
+          PLAN_FILE="./prod-plan-artifacts/${{ env.WORKDIR }}/plan-prod.tfplan"
+          # If your artifact unpacks to a different path adjust above.
+          terraform apply -input=false "${PLAN_FILE}"
