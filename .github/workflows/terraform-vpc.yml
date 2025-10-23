@@ -82,7 +82,9 @@ jobs:
       - name: 🧩 Terraform Format & Validate
         working-directory: ${{ env.WORKDIR }}
         run: |
-          terraform fmt -check || terraform fmt
+          # Ignore exit code 3 from fmt -check to prevent workflow failure
+          terraform fmt -check || true
+          terraform fmt
           terraform validate
 
       - name: 🧮 Terraform Plan / Apply / Destroy
