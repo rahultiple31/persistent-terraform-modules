@@ -93,18 +93,17 @@ jobs:
         run: |
           terraform plan \
             -input=false \
-            -var="aws_region=${{ env.AWS_REGION }}" \
-            -var="environment=${{ env.ENV_NAME }}" \
+            -var-file="terraform.tfvars" \
             -out=tfplan
           terraform show -no-color tfplan > plan-output.txt
-          aws s3 cp tfplan s3://${{ secrets.TF_PLAN_BUCKET }}/plans/${{ env.ENV_NAME }}/vpc-plan.tfplan
-          aws s3 cp plan-output.txt s3://${{ secrets.TF_PLAN_BUCKET }}/plans/${{ env.ENV_NAME }}/plan-output.txt
+          aws s3 cp tfplan s3://terraform-plans-modules/${{ env.PLAN_S3_PATH }}
+          aws s3 cp plan-output.txt s3://terraform-plans-modules/plans/${{ env.ENV_NAME }}/plan-output.txt
 
       - name: ☁️ Download Plan from S3
         if: ${{ env.ACTION == 'apply' }}
         working-directory: ${{ env.WORKDIR }}
         run: |
-          aws s3 cp s3://${{ secrets.TF_PLAN_BUCKET }}/plans/${{ env.ENV_NAME }}/vpc-plan.tfplan tfplan
+          aws s3 cp s3://terraform-plans-modules/${{ env.PLAN_S3_PATH }} tfplan
 
       - name: 🚀 Terraform Apply
         if: ${{ env.ACTION == 'apply' }}
@@ -117,6 +116,5 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: |
           terraform destroy -input=false \
-            -var="aws_region=${{ env.AWS_REGION }}" \
-            -var="environment=${{ env.ENV_NAME }}" \
+            -var-file="terraform.tfvars" \
             -auto-approve
