@@ -11,6 +11,14 @@ on:
           - dev
           - qa
           - prod
+      action:
+        description: "Select Terraform action"
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
 
 permissions:
   contents: read
@@ -52,10 +60,12 @@ jobs:
         id: vars
         run: |
           ENV_NAME=${{ github.event.inputs.environment }}
+          ACTION=${{ github.event.inputs.action }}
           WORKDIR="persistent-terraform-modules/infrastructure/${ENV_NAME}/vpc"
           STATE_KEY="state/${ENV_NAME}/vpc/terraform.tfstate"
 
           echo "ENV_NAME=${ENV_NAME}" >> $GITHUB_ENV
+          echo "ACTION=${ACTION}" >> $GITHUB_ENV
           echo "WORKDIR=${WORKDIR}" >> $GITHUB_ENV
           echo "STATE_KEY=${STATE_KEY}" >> $GITHUB_ENV
 
@@ -74,31 +84,37 @@ jobs:
           terraform fmt -check || terraform fmt
           terraform validate
 
-      - name: 🧮 Terraform Plan
+      - name: 🧮 Terraform Plan / Apply / Destroy
         working-directory: ${{ env.WORKDIR }}
         run: |
           PLAN_FILE="plan-${{ env.ENV_NAME }}.tfplan"
-          terraform plan -input=false -out="${PLAN_FILE}"
-          terraform show -no-color "${PLAN_FILE}" > "${PLAN_FILE}.txt"
 
-      - name: 📤 Upload Terraform plan artifact
+          if [ "${{ env.ACTION }}" == "plan" ]; then
+            echo "📄 Running terraform plan..."
+            terraform plan -input=false -out="${PLAN_FILE}"
+            terraform show -no-color "${PLAN_FILE}" > "${PLAN_FILE}.txt"
+            echo "✅ Plan complete. Artifact generated."
+
+          elif [ "${{ env.ACTION }}" == "apply" ]; then
+            echo "🚀 Running terraform apply..."
+            terraform apply -input=false -auto-approve "${PLAN_FILE}"
+            echo "✅ Apply complete."
+
+          elif [ "${{ env.ACTION }}" == "destroy" ]; then
+            echo "💥 Running terraform destroy..."
+            terraform destroy -input=false -auto-approve
+            echo "✅ Destroy complete."
+
+          else
+            echo "❌ Invalid action: ${{ env.ACTION }}"
+            exit 1
+          fi
+
+      - name: 📤 Upload Plan Artifact (only for plan)
+        if: ${{ env.ACTION == 'plan' }}
         uses: actions/upload-artifact@v4
         with:
           name: tf-plan-${{ env.ENV_NAME }}
           path: |
             ${{ env.WORKDIR }}/plan-${{ env.ENV_NAME }}.tfplan
             ${{ env.WORKDIR }}/plan-${{ env.ENV_NAME }}.tfplan.txt
-
-      - name: 🚀 Terraform Apply (Auto for Dev/QA)
-        if: ${{ env.ENV_NAME != 'prod' }}
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          terraform apply -auto-approve -input=false plan-${{ env.ENV_NAME }}.tfplan
-
-      - name: ⏸️ Terraform Apply (Manual Approval for Prod)
-        if: ${{ env.ENV_NAME == 'prod' }}
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          echo "🔒 Awaiting manual approval for PROD environment..."
-          echo "Please approve the job in the 'prod' environment in GitHub UI before continuing."
-          terraform apply -input=false plan-${{ env.ENV_NAME }}.tfplan
