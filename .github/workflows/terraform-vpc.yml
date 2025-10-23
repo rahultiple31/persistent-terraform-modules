@@ -16,7 +16,6 @@ permissions:
   contents: read
   id-token: write
   actions: read
-  metadata: read
 
 concurrency:
   group: terraform-vpc-${{ github.event.inputs.environment }}
