@@ -83,11 +83,8 @@ jobs:
       - name: 🧩 Terraform Format & Validate
         working-directory: ${{ env.WORKDIR }}
         run: |
-          # Automatically format all Terraform files
           terraform fmt -recursive
-          # Validate Terraform configuration
           terraform validate
-
 
       - name: 🧮 Terraform Plan
         if: ${{ env.ACTION == 'plan' }}
@@ -117,6 +114,13 @@ jobs:
         if: ${{ env.ACTION == 'destroy' }}
         working-directory: ${{ env.WORKDIR }}
         run: |
+          echo "Destroying Terraform resources in environment: ${{ env.ENV_NAME }}"
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
           terraform destroy -input=false \
             -var-file="terraform.tfvars" \
             -auto-approve
