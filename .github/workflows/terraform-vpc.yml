@@ -4,10 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Select environment"
+        description: "Select the environment to deploy"
         required: true
         type: choice
-        options: [dev, qa, prod]
+        options:
+          - dev
+          - qa
+          - prod
+      action:
+        description: "Select Terraform action"
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
 
 permissions:
   contents: read
@@ -28,44 +39,84 @@ jobs:
     environment: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: 🧾 Checkout
+      - name: 🧾 Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: ⚙️ Setup Terraform
+      - name: ⚙️ Set up Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: 🔐 Configure AWS
+      - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: 🧱 Init
-        working-directory: infrastructure/${{ github.event.inputs.environment }}/vpc
+      - name: 📁 Define environment variables
+        id: vars
+        run: |
+          ENV_NAME=${{ github.event.inputs.environment }}
+          ACTION=${{ github.event.inputs.action }}
+          WORKDIR="infrastructure/${ENV_NAME}/vpc"
+          STATE_KEY="state/${ENV_NAME}/vpc/terraform.tfstate"
+          PLAN_S3_PATH="plans/${ENV_NAME}/vpc-plan.tfplan"
+
+          echo "ENV_NAME=${ENV_NAME}" >> $GITHUB_ENV
+          echo "ACTION=${ACTION}" >> $GITHUB_ENV
+          echo "WORKDIR=${WORKDIR}" >> $GITHUB_ENV
+          echo "STATE_KEY=${STATE_KEY}" >> $GITHUB_ENV
+          echo "PLAN_S3_PATH=${PLAN_S3_PATH}" >> $GITHUB_ENV
+
+      - name: 🧱 Terraform Init
+        working-directory: ${{ env.WORKDIR }}
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=state/${{ github.event.inputs.environment }}/vpc/terraform.tfstate" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true"
 
-      - name: 🧮 Plan
-        id: plan
-        working-directory: infrastructure/${{ github.event.inputs.environment }}/vpc
-        run: terraform plan -out=tfplan
+      - name: 🧩 Terraform Format & Validate
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          terraform fmt -check || true
+          terraform fmt
+          terraform validate
 
-      - name: 🛑 Manual Approval
-        if: ${{ github.event.inputs.environment == 'prod' }}
-        uses: trstringer/manual-approval@v1
-        with:
-          approvers: rahul-tiple
-          minimum-approvals: 1
-          issue-title: "Approve Terraform Apply for PROD"
-          issue-body: "Approve to apply VPC changes to PROD."
+      - name: 🧮 Terraform Plan
+        if: ${{ env.ACTION == 'plan' }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          terraform plan \
+            -input=false \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="environment=${{ env.ENV_NAME }}" \
+            -out=tfplan
+          terraform show -no-color tfplan > plan-output.txt
+          aws s3 cp tfplan s3://${{ secrets.TF_PLAN_BUCKET }}/plans/${{ env.ENV_NAME }}/vpc-plan.tfplan
+          aws s3 cp plan-output.txt s3://${{ secrets.TF_PLAN_BUCKET }}/plans/${{ env.ENV_NAME }}/plan-output.txt
 
-      - name: 🚀 Apply
-        working-directory: infrastructure/${{ github.event.inputs.environment }}/vpc
-        run: terraform apply -auto-approve tfplan
+      - name: ☁️ Download Plan from S3
+        if: ${{ env.ACTION == 'apply' }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          aws s3 cp s3://${{ secrets.TF_PLAN_BUCKET }}/plans/${{ env.ENV_NAME }}/vpc-plan.tfplan tfplan
+
+      - name: 🚀 Terraform Apply
+        if: ${{ env.ACTION == 'apply' }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: 💥 Terraform Destroy
+        if: ${{ env.ACTION == 'destroy' }}
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          terraform destroy -input=false \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="environment=${{ env.ENV_NAME }}" \
+            -auto-approve
