@@ -22,6 +22,6 @@ module "vpc" {
   enable_nat_gateway      = var.enable_nat_gateway
   create_internet_gateway = var.create_internet_gateway
 
-  # Common tags
+  # Tags
   tags = var.tags
 }
