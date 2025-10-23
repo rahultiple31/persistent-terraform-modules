@@ -1,5 +1,5 @@
 module "vpc" {
-  source = "git::https://github.com/Sycurio/terraform-base-module.git//aws/vpc?ref=main"
+  source = "git::https://github.com/rahultiple31/persistent-terraform-base.git//aws/vpc?ref=main"
 
   # Basic info
   name        = var.vpc_name
